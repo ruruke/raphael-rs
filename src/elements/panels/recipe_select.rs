@@ -4,8 +4,9 @@ use egui::{
 };
 use egui_extras::Column;
 use raphael_data::{
-    Consumable, Locale, RLVLS, Recipe, find_recipes, find_stellar_missions, get_game_settings,
-    get_job_name,
+    Consumable, Locale, RLVLS, Recipe, RecipeSearchEntry, RecipeSearchQuery,
+    StellarMissionSearchEntry, StellarSearchQuery, find_recipes, find_stellar_missions,
+    get_game_settings, get_job_name,
 };
 use raphael_translations::{t, t_format};
 
@@ -37,30 +38,25 @@ impl SearchDomain {
 #[derive(Default)]
 struct RecipeFinder {}
 
-impl ComputerMut<(&str, Locale), Vec<raphael_data::RecipeSearchEntry>> for RecipeFinder {
-    fn compute(&mut self, (text, locale): (&str, Locale)) -> Vec<raphael_data::RecipeSearchEntry> {
-        find_recipes(text, locale).collect::<Vec<_>>()
+impl ComputerMut<RecipeSearchQuery<'_>, Vec<RecipeSearchEntry>> for RecipeFinder {
+    fn compute(&mut self, query: RecipeSearchQuery) -> Vec<RecipeSearchEntry> {
+        find_recipes(query).collect::<Vec<_>>()
     }
 }
 
-type RecipeSearchCache<'a> = FrameCache<Vec<raphael_data::RecipeSearchEntry>, RecipeFinder>;
+type RecipeSearchCache<'a> = FrameCache<Vec<RecipeSearchEntry>, RecipeFinder>;
 
 #[derive(Default)]
 struct StellarMissionFinder {}
 
-impl ComputerMut<(&str, Locale), Vec<raphael_data::StellarMissionSearchEntry>>
-    for StellarMissionFinder
-{
-    fn compute(
-        &mut self,
-        (text, locale): (&str, Locale),
-    ) -> Vec<raphael_data::StellarMissionSearchEntry> {
-        find_stellar_missions(text, locale).collect::<Vec<_>>()
+impl ComputerMut<StellarSearchQuery<'_>, Vec<StellarMissionSearchEntry>> for StellarMissionFinder {
+    fn compute(&mut self, query: StellarSearchQuery) -> Vec<StellarMissionSearchEntry> {
+        find_stellar_missions(query).collect::<Vec<_>>()
     }
 }
 
 type StellarMissionSearchCache<'a> =
-    FrameCache<Vec<raphael_data::StellarMissionSearchEntry>, StellarMissionFinder>;
+    FrameCache<Vec<StellarMissionSearchEntry>, StellarMissionFinder>;
 
 pub struct RecipeSelect<'a> {
     search_state: &'a mut RecipeSearchState,
@@ -116,10 +112,13 @@ impl<'a> RecipeSelect<'a> {
                 RecipeSearchState {
                     search_domain,
                     search_text,
+                    active_job_only,
                     ..
                 },
             ..
         } = self;
+
+        let job_id = active_job_only.then_some(self.crafter_config.selected_job);
 
         ui.horizontal(|ui| {
             ui.add(DropDown::new(
@@ -128,13 +127,20 @@ impl<'a> RecipeSelect<'a> {
                 [SearchDomain::Recipes, SearchDomain::StellarMissions],
                 |search_domain: SearchDomain| search_domain.display(locale),
             ));
+            let search_text_edit_width = ui.available_width()
+                - (util::text_width(ui, "⚙", egui::TextStyle::Button)
+                    + ui.style().spacing.button_padding.x * 2.0)
+                - ui.style().spacing.item_spacing.x;
             if egui::TextEdit::singleline(search_text)
-                .desired_width(f32::INFINITY)
+                .desired_width(search_text_edit_width)
                 .hint_text(t!(locale, "🔍 Search"))
                 .ui(ui)
                 .changed()
             {
                 *search_text = search_text.replace('\0', "");
+            }
+            if ui.button("⚙").clicked() {
+                set_filter_modal_visibility(ui.ctx(), true);
             }
         });
 
@@ -145,7 +151,11 @@ impl<'a> RecipeSelect<'a> {
                 let search_result = ui.ctx().memory_mut(|mem| {
                     mem.caches
                         .cache::<RecipeSearchCache<'_>>()
-                        .get((search_text, locale))
+                        .get(RecipeSearchQuery {
+                            text: search_text,
+                            locale,
+                            job_id,
+                        })
                         .clone()
                 });
                 self.draw_recipe_select_table(ui, search_result);
@@ -154,7 +164,11 @@ impl<'a> RecipeSelect<'a> {
                 let search_result = ui.ctx().memory_mut(|mem| {
                     mem.caches
                         .cache::<StellarMissionSearchCache<'_>>()
-                        .get((search_text, locale))
+                        .get(StellarSearchQuery {
+                            text: search_text,
+                            locale,
+                            job_id,
+                        })
                         .clone()
                 });
                 self.draw_mission_recipe_select(ui, search_result);
@@ -165,7 +179,7 @@ impl<'a> RecipeSelect<'a> {
     fn draw_recipe_select_table(
         &mut self,
         ui: &mut egui::Ui,
-        search_result: Vec<raphael_data::RecipeSearchEntry>,
+        search_result: Vec<RecipeSearchEntry>,
     ) {
         let locale = self.locale;
         let line_height = ui.spacing().interact_size.y;
@@ -436,12 +450,46 @@ impl<'a> RecipeSelect<'a> {
             });
         });
     }
+    fn draw_recipe_filter_modal(&mut self, ctx: &egui::Context) {
+        let locale = self.locale;
+        egui::containers::Modal::new(egui::Id::new("RECIPE_FILTER_MODAL")).show(ctx, |ui| {
+            ui.set_width(
+                (ctx.content_rect().width() - ui.style().spacing.item_spacing.x * 4.0)
+                    .clamp(0.0, 360.0),
+            );
+            ui.style_mut().spacing.item_spacing.y = 3.0;
+            ui.label(egui::RichText::new(t!(locale, "Recipe filters")).strong());
+            ui.separator();
+            ui.checkbox(
+                &mut self.search_state.active_job_only,
+                t!(locale, "Active job only"),
+            );
+            ui.separator();
+            ui.vertical_centered_justified(|ui| {
+                if ui.button(t!(locale, "Close")).clicked() {
+                    set_filter_modal_visibility(ctx, false);
+                }
+            });
+        });
+    }
+}
+fn filter_modal_is_visible(ctx: &egui::Context) -> bool {
+    let id = egui::Id::new("RECIPE_FILTER_MODAL_VISIBLE");
+    ctx.data(|data| data.get_temp(id) == Some(true))
+}
+
+fn set_filter_modal_visibility(ctx: &egui::Context, visible: bool) {
+    let id = egui::Id::new("RECIPE_FILTER_MODAL_VISIBLE");
+    ctx.data_mut(|data| data.insert_temp(id, visible));
 }
 
 impl Widget for RecipeSelect<'_> {
     fn ui(mut self, ui: &mut egui::Ui) -> egui::Response {
         let locale = self.locale;
 
+        if filter_modal_is_visible(ui.ctx()) {
+            self.draw_recipe_filter_modal(ui.ctx());
+        }
         ui.group(|ui| {
             ui.style_mut().spacing.item_spacing = egui::vec2(8.0, 3.0);
             ui.vertical(|ui| {
