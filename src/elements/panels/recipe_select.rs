@@ -4,15 +4,15 @@ use egui::{
 };
 use egui_extras::Column;
 use raphael_data::{
-    Consumable, Locale, RLVLS, Recipe, RecipeSearchEntry, RecipeSearchQuery,
+    Consumable, CosmicExplorationZone, Locale, RLVLS, Recipe, RecipeSearchEntry, RecipeSearchQuery,
     StellarMissionSearchEntry, StellarSearchQuery, find_recipes, find_stellar_missions,
-    get_game_settings, get_job_name,
+    get_cosmic_exploration_zone_name, get_game_settings, get_job_name,
 };
 use raphael_translations::{t, t_format};
 
 use crate::{
     config::{CrafterConfig, QualitySource, RecipeConfiguration, RecipeSource},
-    context::{AppContext, RecipeSearchState, SolverConfig},
+    context::{AppContext, RecipeSearchFilters, RecipeSearchState, SolverConfig},
     elements::{
         util::{self, TableColumnWidth},
         widgets::{DropDown, GameDataNameLabel, NameSource, collapse_persisted},
@@ -107,29 +107,30 @@ impl<'a> RecipeSelect<'a> {
 
     fn draw_normal_recipe_select(&mut self, ui: &mut egui::Ui) {
         let locale = self.locale;
+        let filters_active = self.search_state.filters_active();
         let Self {
             search_state:
                 RecipeSearchState {
                     search_domain,
                     search_text,
-                    active_job_only,
+                    filters,
                     ..
                 },
             ..
         } = self;
 
-        let job_id = active_job_only.then_some(self.crafter_config.selected_job);
-
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
             ui.add(DropDown::new(
                 "RECIPE_SEARCH_DOMAIN",
                 search_domain,
                 [SearchDomain::Recipes, SearchDomain::StellarMissions],
                 |search_domain: SearchDomain| search_domain.display(locale),
             ));
+            let button_text_size = egui::TextStyle::Button.resolve(ui.style()).size;
+            let icon_size = egui::Vec2::splat(button_text_size);
             let search_text_edit_width = ui.available_width()
-                - (util::text_width(ui, "⚙", egui::TextStyle::Button)
-                    + ui.style().spacing.button_padding.x * 2.0)
+                - (icon_size.x + ui.style().spacing.button_padding.x * 2.0)
                 - ui.style().spacing.item_spacing.x;
             if egui::TextEdit::singleline(search_text)
                 .desired_width(search_text_edit_width)
@@ -139,9 +140,7 @@ impl<'a> RecipeSelect<'a> {
             {
                 *search_text = search_text.replace('\0', "");
             }
-            if ui.button("⚙").clicked() {
-                set_filter_modal_visibility(ui.ctx(), true);
-            }
+            Self::draw_recipe_filter_button(ui, filters_active, icon_size);
         });
 
         ui.separator();
@@ -154,7 +153,7 @@ impl<'a> RecipeSelect<'a> {
                         .get(RecipeSearchQuery {
                             text: search_text,
                             locale,
-                            job_id,
+                            filters: filters.construct_recipe_filter(self.crafter_config),
                         })
                         .clone()
                 });
@@ -167,7 +166,7 @@ impl<'a> RecipeSelect<'a> {
                         .get(StellarSearchQuery {
                             text: search_text,
                             locale,
-                            job_id,
+                            filters: filters.construct_stellar_mission_filter(self.crafter_config),
                         })
                         .clone()
                 });
@@ -450,29 +449,104 @@ impl<'a> RecipeSelect<'a> {
             });
         });
     }
+
     fn draw_recipe_filter_modal(&mut self, ctx: &egui::Context) {
         let locale = self.locale;
+        let RecipeSearchFilters {
+            active_job_only,
+            cosmic_exploration_zone,
+        } = &mut self.search_state.filters;
+
         egui::containers::Modal::new(egui::Id::new("RECIPE_FILTER_MODAL")).show(ctx, |ui| {
             ui.set_width(
                 (ctx.content_rect().width() - ui.style().spacing.item_spacing.x * 4.0)
-                    .clamp(0.0, 360.0),
+                    .clamp(0.0, 395.0),
             );
-            ui.style_mut().spacing.item_spacing.y = 3.0;
+            ui.style_mut().spacing.item_spacing = egui::Vec2::new(4.0, 4.0);
             ui.label(egui::RichText::new(t!(locale, "Recipe filters")).strong());
             ui.separator();
-            ui.checkbox(
-                &mut self.search_state.active_job_only,
-                t!(locale, "Active job only"),
+            ui.checkbox(active_job_only, t!(locale, "Active job only"));
+            ui.separator();
+            ui.label(
+                egui::RichText::new(t!(locale, "Stellar missions"))
+                    .color(ui.visuals().widgets.hovered.text_color()),
             );
+            ui.horizontal_wrapped(|ui| {
+                for zone in [
+                    CosmicExplorationZone::SinusArdorum,
+                    CosmicExplorationZone::Phaenna,
+                    CosmicExplorationZone::Oizys,
+                    CosmicExplorationZone::Auxesia,
+                ] {
+                    let response = ui.selectable_label(
+                        cosmic_exploration_zone.is_none_or(|selected| selected == zone),
+                        get_cosmic_exploration_zone_name(zone, locale),
+                    );
+                    if response.clicked() {
+                        if *cosmic_exploration_zone != Some(zone) {
+                            *cosmic_exploration_zone = Some(zone);
+                        } else {
+                            *cosmic_exploration_zone = None;
+                        }
+                    }
+                }
+            });
             ui.separator();
             ui.vertical_centered_justified(|ui| {
-                if ui.button(t!(locale, "Close")).clicked() {
+                if ui.button(t!(locale, "Close")).clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
                     set_filter_modal_visibility(ctx, false);
                 }
             });
         });
     }
+
+    fn draw_recipe_filter_button(ui: &mut egui::Ui, filters_active: bool, icon_size: egui::Vec2) {
+        // Placing the first point at the top left causes the shape to be misdrawn.
+        // As a workaround, the first point is placed in the middle horizontally and the top left one is added at the end.
+        const FUNNEL_POINTS_RELATIVE: [[f32; 2]; 7] = [
+            [0.5, 0.055],
+            [1.0, 0.055],
+            [0.6, 0.55],
+            [0.6, 0.975],
+            [0.4, 0.875],
+            [0.4, 0.55],
+            [0.0, 0.055],
+        ];
+
+        ui.scope(|ui| {
+            if filters_active {
+                util::use_highlighted_widget_bg_color(ui);
+            }
+            let icon_id = ui.next_auto_id();
+            let response = egui::Button::new(egui::Atom::custom(icon_id, icon_size)).atom_ui(ui);
+            if let Some(rect) = response.rect(icon_id) {
+                let points = FUNNEL_POINTS_RELATIVE
+                    .into_iter()
+                    .map(|point| rect.lerp_inside(point))
+                    .collect();
+                let fill = if response.hovered() {
+                    ui.visuals().widgets.hovered.text_color()
+                } else if response.is_pointer_button_down_on() {
+                    ui.visuals().widgets.active.text_color()
+                } else {
+                    ui.visuals().widgets.inactive.text_color()
+                };
+                ui.painter_at(rect).add(egui::epaint::PathShape {
+                    points,
+                    closed: true,
+                    fill,
+                    stroke: egui::epaint::PathStroke::NONE,
+                });
+            }
+            if response.clicked() {
+                set_filter_modal_visibility(ui.ctx(), true);
+            }
+        });
+    }
 }
+
 fn filter_modal_is_visible(ctx: &egui::Context) -> bool {
     let id = egui::Id::new("RECIPE_FILTER_MODAL_VISIBLE");
     ctx.data(|data| data.get_temp(id) == Some(true))
